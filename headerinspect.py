@@ -1,100 +1,165 @@
 import requests
 import argparse
+import logging
+import urllib3
+import socket
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
-# Define the security headers to be checked
-SECURITY_HEADERS = [
+# Initialize logging without timestamps
+logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+
+# Disable InsecureRequestWarning
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Default security headers
+DEFAULT_SECURITY_HEADERS = [
     'Content-Security-Policy',
     'X-Frame-Options',
     'Strict-Transport-Security'
 ]
 
-def check_headers(host, header_results, server_headers):
+@lru_cache(maxsize=100)
+def fetch_url(url):
     """
-    Checks the specified security headers for a given URL or IP.
+    Fetches a URL with caching to avoid repetitive checks.
+    Ignores SSL certificate verification.
     """
-    # If provided input looks like an IP or if it's just a URL without a protocol,
-    # we will attempt both http and https.
-    protocols = ['http', 'https'] if (host.replace('.', '').isdigit() or "://" not in host) else [host.split('://')[0]]
+    try:
+        response = requests.get(url, timeout=10, verify=False)
+        return response.headers
+    except requests.ConnectionError:
+        logging.error(f"Connection error: Unable to connect to {url}")
+    except requests.Timeout:
+        logging.error(f"Timeout error: Connection to {url} timed out")
+    except requests.TooManyRedirects:
+        logging.error(f"Redirect error: Too many redirects for {url}")
+    except requests.RequestException as e:
+        logging.error(f"HTTP error for {url}: {e}")
+    return None
 
-    for protocol in protocols:
-        url = f"{protocol}://{host}" if (host.replace('.', '').isdigit() or "://" not in host) else host
+@lru_cache(maxsize=100)
+def get_ip_address(url):
+    """
+    Extracts the domain from a URL and resolves it to an IP address.
+    """
+    try:
+        domain = urlparse(url).netloc.split(':')[0]
+        return socket.gethostbyname(domain)
+    except socket.gaierror:
+        return None
 
-        try:
-            response = requests.get(url, timeout=10)
-            headers = response.headers
+def check_headers(url, header_results, server_headers, security_headers):
+    """
+    Checks the specified security headers for a given URL.
+    """
+    headers = fetch_url(url)
 
-            # Check if the URL uses HTTPS to decide the need for HSTS
-            is_https = url.lower().startswith('https://')
+    if headers is None:
+        return
 
-            for header in SECURITY_HEADERS:
-                if header not in headers:
-                    if header == 'Strict-Transport-Security' and not is_https:
-                        continue
-                    header_results[header].append(url)
-            if 'Server' in headers:
-                server_value = headers['Server']
-                if server_value not in server_headers:
-                    server_headers[server_value] = []
-                server_headers[server_value].append(url)
+    is_https = url.lower().startswith('https://')
+    ip_address = get_ip_address(url)
 
-        except requests.RequestException as e:
-            print(f"Error fetching {url}: {e}")
+    for header in security_headers:
+        if header not in headers:
+            if header == 'Strict-Transport-Security' and not is_https:
+                continue
+            header_results[header].append((url, ip_address))
+    if 'Server' in headers:
+        server_value = headers['Server']
+        if server_value not in server_headers:
+            server_headers[server_value] = []
+        server_headers[server_value].append((url, ip_address))
+
+def expand_hosts(hosts):
+    """
+    Expands a list of hosts to include both HTTP and HTTPS protocols.
+    """
+    expanded_hosts = []
+    for host in hosts:
+        if "://" in host:
+            expanded_hosts.append(host)
+        else:
+            expanded_hosts.append(f"http://{host}")
+            expanded_hosts.append(f"https://{host}")
+    return expanded_hosts
+
+def sort_urls(urls):
+    """
+    Sorts URLs first by protocol (HTTP, then HTTPS), and then numerically by IP address.
+    """
+    def get_protocol_and_ip(url):
+        protocol = urlparse(url[0]).scheme
+        ip = url[1]
+        # Convert IP address to a tuple of integers for proper numerical sorting
+        ip_tuple = tuple(int(part) for part in ip.split('.'))
+        return (protocol, ip_tuple)
+
+    return sorted(urls, key=get_protocol_and_ip)
 
 def main():
-    # Argument parsing
     parser = argparse.ArgumentParser(description='Inspect security headers of a website.')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('-u', '--url', help='Specify a single host or IP (e.g., http://example.com or 192.168.1.1)')
-    group.add_argument('-iL', help='Specify a file containing a list of hosts or IPs (one per line)')
-    parser.add_argument('-o', '--output', help='Specify an output file to export results', required=False)
+    group.add_argument('-u', '--url', help='Specify a single host or URL')
+    group.add_argument('-iL', help='Specify a file containing a list of hosts or URLs')
+    parser.add_argument('-o', '--output', help='Specify an output file to export results')
+    parser.add_argument('-hL', '--headers', nargs='+', help='Specify headers to check', default=DEFAULT_SECURITY_HEADERS)
     args = parser.parse_args()
 
-    header_results = {header: [] for header in SECURITY_HEADERS}
+    header_results = {header: [] for header in args.headers}
     server_headers = {}
 
-    # Checking headers for single host/IP or list of hosts/IPs
+    hosts_to_check = []
     if args.url:
-        check_headers(args.url, header_results, server_headers)
+        hosts_to_check.append(args.url)
     elif args.iL:
         try:
             with open(args.iL, 'r') as file:
-                hosts = file.readlines()
-                for host in hosts:
-                    check_headers(host.strip(), header_results, server_headers)
+                hosts_to_check.extend([host.strip() for host in file.readlines()])
         except FileNotFoundError:
-            print(f"Error: File '{args.iL}' not found.")
+            logging.error(f"Error: File '{args.iL}' not found.")
             return
 
-    results = []
+    expanded_hosts = expand_hosts(hosts_to_check)
+    total_checks = len(expanded_hosts)
+    logging.info(f"Starting header checks for {total_checks} URLs.")
 
-    # Building the result strings
-    results.append("Results:")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(check_headers, url, header_results, server_headers, args.headers): url for url in expanded_hosts}
+
+        for future in as_completed(futures):
+            url = futures[future]
+            total_checks -= 1
+            logging.info(f"Checked {url}. {total_checks} URLs remaining.")
+
+    # Sorting logic for results
+    for header in header_results:
+        header_results[header] = sort_urls(header_results[header])
+
+    results = ["Results:"]
     for header, urls in header_results.items():
-        results.append(f"\n{header} Header\n{'-'*30}")
+        results.append(f"\n{header} Header Missing:\n{'-'*30}")
         if urls:
-            results.append("Missing On:")
-            for url in urls:
+            for url, _ in urls:
                 results.append(url)
         else:
             results.append("All hosts had this security header.")
 
-    # Collecting the 'Server' header information
-    if server_headers:
-        for server_value, urls in server_headers.items():
-            results.append(f"\nServer Header: {server_value}\n{'-'*30}")
-            for url in urls:
-                results.append(url)
-    else:
-        results.append("\nServer Header\n" + "-"*30)
-        results.append("No servers were using a Server header.")
+    # Apply the same sorting logic to server headers
+    for server_value, urls in server_headers.items():
+        server_headers[server_value] = sort_urls(urls)
+        results.append(f"\nServer Header: {server_value}\n{'-'*30}")
+        for url, _ in urls:
+            results.append(url)
 
-    # Outputting results to file or console
     if args.output:
         try:
             with open(args.output, 'w') as outfile:
                 outfile.write('\n'.join(results))
         except IOError as e:
-            print(f"Error writing to file '{args.output}': {e}")
+            logging.error(f"Error writing to file '{args.output}': {e}")
     else:
         for line in results:
             print(line)
