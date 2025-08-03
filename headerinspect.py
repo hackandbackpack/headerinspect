@@ -142,8 +142,18 @@ def validate_url(url: str) -> Tuple[bool, str]:
     
     url = url.strip()
     
-    # Basic URL pattern validation
-    url_pattern = re.compile(
+    # IP address pattern for IPv4
+    ip_pattern = re.compile(
+        r'^(?:http[s]?://)?'  # Optional protocol
+        r'(?:'
+        r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}'  # First 3 octets
+        r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'  # Last octet
+        r'(?::[0-9]{1,5})?'  # Optional port
+        r'(?:/.*)?$'  # Optional path
+    )
+    
+    # Domain name pattern
+    domain_pattern = re.compile(
         r'^(?:http[s]?://)?'  # Optional protocol
         r'(?:[a-zA-Z0-9-]+\.)*'  # Subdomains
         r'[a-zA-Z0-9-]+'  # Domain
@@ -152,7 +162,8 @@ def validate_url(url: str) -> Tuple[bool, str]:
         r'(?:/.*)?$'  # Optional path
     )
     
-    if not url_pattern.match(url):
+    # Check if it's a valid IP or domain
+    if not (ip_pattern.match(url) or domain_pattern.match(url)):
         return False, f"Invalid URL format: {url}"
     
     # Check for suspicious patterns
