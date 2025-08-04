@@ -24,6 +24,119 @@ DEFAULT_SECURITY_HEADERS = [
     'Strict-Transport-Security'
 ]
 
+# Information disclosure headers to detect
+INFO_DISCLOSURE_HEADERS = {
+    'Technology Stack': [
+        'X-Powered-By',
+        'X-AspNet-Version',
+        'X-AspNetMvc-Version',
+        'X-Runtime',
+        'X-Version',
+        'X-Generator',
+        'X-Drupal-Cache',
+        'X-Drupal-Dynamic-Cache',
+        'X-Django-Version',
+        'Server',
+        'X-Server',
+        'X-Turbo-Charged-By',
+        'X-Mod-Pagespeed',
+        'X-Page-Speed',
+        'X-CF-Powered-By'
+    ],
+    'Debugging/Development': [
+        'X-Debug-Token',
+        'X-Debug-Token-Link',
+        'X-Trace-Id',
+        'X-Request-Id',
+        'X-Correlation-Id',
+        'X-B3-TraceId',
+        'X-B3-SpanId',
+        'X-Amz-Trace-Id',
+        'X-Cloud-Trace-Context',
+        'X-SourceFiles',
+        'X-Stacktrace',
+        'X-Exception',
+        'X-Error',
+        'X-Error-Message'
+    ],
+    'Infrastructure/Proxy': [
+        'Via',
+        'X-Real-IP',
+        'X-Forwarded-Server',
+        'X-Backend-Server',
+        'X-Upstream-Addr',
+        'X-Upstream-Response-Time',
+        'X-Upstream-Status',
+        'X-Served-By',
+        'X-Host',
+        'X-Backend-Host',
+        'X-Original-Host',
+        'X-Forwarded-Host',
+        'X-Forwarded-Port',
+        'X-Forwarded-Proto',
+        'X-Real-Port',
+        'X-Scheme'
+    ],
+    'Caching/CDN': [
+        'X-Varnish',
+        'X-Varnish-Cache',
+        'X-Cache',
+        'X-Cache-Hits',
+        'X-Cache-Status',
+        'X-Proxy-Cache',
+        'CF-Ray',
+        'CF-Cache-Status',
+        'X-Amz-Cf-Id',
+        'X-Amz-Cf-Pop',
+        'X-Amz-Request-Id',
+        'X-Amz-Id-2',
+        'X-Fastly-Request-ID',
+        'X-Azure-Ref',
+        'X-Akamai-Request-ID',
+        'X-CDN',
+        'X-Pull-Key',
+        'X-Device-Type'
+    ],
+    'Container/Orchestration': [
+        'X-Kubernetes-PF-FlowSchema-UID',
+        'X-Kubernetes-PF-PriorityLevel-UID',
+        'X-Docker-Container-ID',
+        'X-Served-By-Pod',
+        'X-Served-By-Namespace'
+    ],
+    'Load Balancer': [
+        'X-Haproxy-Server-State',
+        'X-Load-Balancer',
+        'X-LB-Server',
+        'X-Balancer-Worker-IP',
+        'X-Balancer-Worker-Route'
+    ],
+    'Authentication': [
+        'X-Auth-Server',
+        'X-Authentication-Type',
+        'X-Auth-Method',
+        'WWW-Authenticate',
+        'X-OAuth-Scopes',
+        'X-User-Id',
+        'X-User-Email',
+        'X-Username'
+    ],
+    'Miscellaneous': [
+        'X-Rack-Cache',
+        'X-Old-Content-Length',
+        'X-Runtime-Version',
+        'X-Hostname',
+        'X-Server-Name',
+        'X-Node',
+        'X-Pod-Name',
+        'X-Instance-ID',
+        'X-EC2-Instance-ID',
+        'X-Request-Start',
+        'X-Queue-Start',
+        'X-Render-Time'
+    ]
+}
+
 # Default User-Agent - Firefox on Windows
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0'
 
@@ -103,13 +216,8 @@ def analyze_security_headers(headers: Dict, url: str, security_headers: List[str
             missing_headers.append(header)
     return missing_headers
 
-def collect_server_info(headers: Dict) -> Optional[str]:
-    """
-    Extracts server information from headers.
-    """
-    return headers.get('Server')
 
-def check_headers(url: str, header_results: Dict, server_headers: Dict, security_headers: List[str], stats: Dict, timeout: int = 10, user_agent: str = DEFAULT_USER_AGENT) -> None:
+def check_headers(url: str, header_results: Dict, info_headers: Dict, security_headers: List[str], stats: Dict, timeout: int = 10, user_agent: str = DEFAULT_USER_AGENT) -> None:
     """
     Orchestrates header checking and result collection for a given URL.
     """
@@ -126,12 +234,21 @@ def check_headers(url: str, header_results: Dict, server_headers: Dict, security
     for header in missing_headers:
         header_results[header].append((url, ip_address))
         stats['missing_headers'][header] += 1
+    # Server header collection removed - now handled in INFO_DISCLOSURE_HEADERS
     
-    server_info = collect_server_info(headers)
-    if server_info:
-        if server_info not in server_headers:
-            server_headers[server_info] = []
-        server_headers[server_info].append((url, ip_address))
+    # Check for information disclosure headers (always enabled)
+    for category, header_list in INFO_DISCLOSURE_HEADERS.items():
+        for header_name in header_list:
+            header_value = headers.get(header_name)
+            if header_value:
+                if category not in info_headers:
+                    info_headers[category] = {}
+                if header_name not in info_headers[category]:
+                    info_headers[category][header_name] = []
+                info_headers[category][header_name].append((url, ip_address, header_value))
+                if category not in stats['info_disclosure_headers']:
+                    stats['info_disclosure_headers'][category] = defaultdict(int)
+                stats['info_disclosure_headers'][category][header_name] += 1
 
 def validate_url(url: str) -> Tuple[bool, str]:
     """
@@ -197,11 +314,17 @@ def sort_urls(urls):
     """
     Sorts URLs first by protocol (HTTP, then HTTPS), and then numerically by IP address.
     """
-    def get_protocol_and_ip(url):
-        protocol = urlparse(url[0]).scheme
-        ip = url[1]
+    def get_protocol_and_ip(url_data):
+        protocol = urlparse(url_data[0]).scheme
+        ip = url_data[1]
         # Convert IP address to a tuple of integers for proper numerical sorting
-        ip_tuple = tuple(int(part) for part in ip.split('.'))
+        if ip and '.' in ip:
+            try:
+                ip_tuple = tuple(int(part) for part in ip.split('.'))
+            except ValueError:
+                ip_tuple = (0, 0, 0, 0)
+        else:
+            ip_tuple = (0, 0, 0, 0)
         return (protocol, ip_tuple)
 
     return sorted(urls, key=get_protocol_and_ip)
@@ -260,6 +383,15 @@ def generate_summary_stats(stats: Dict, header_results: Dict, total_urls: int) -
             missing_percent = (missing_count / stats['successful_checks']) * 100
             summary.append(f"  {header}: {missing_count}/{stats['successful_checks']} missing ({missing_percent:.1f}%)")
     
+    if stats['info_disclosure_headers']:
+        summary.append("\nInformation Disclosure Headers Found:")
+        for category, headers_dict in sorted(stats['info_disclosure_headers'].items()):
+            summary.append(f"\n  [{category}]")
+            for header, count in sorted(headers_dict.items()):
+                if stats['successful_checks'] > 0:
+                    percent = (count / stats['successful_checks']) * 100
+                    summary.append(f"    {header}: {count} sites ({percent:.1f}%)")
+    
     return summary
 
 def main():
@@ -279,12 +411,13 @@ def main():
         return
 
     header_results = {header: [] for header in args.headers}
-    server_headers = {}
+    info_headers = {}
     stats = {
         'total_checked': 0,
         'successful_checks': 0,
         'failed_checks': 0,
-        'missing_headers': defaultdict(int)
+        'missing_headers': defaultdict(int),
+        'info_disclosure_headers': defaultdict(int)
     }
 
     hosts_to_check = []
@@ -315,7 +448,7 @@ def main():
     dns_cache = batch_dns_resolution(expanded_hosts)
 
     with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
-        futures = {executor.submit(check_headers, url, header_results, server_headers, args.headers, stats, args.timeout, args.user_agent): url for url in expanded_hosts}
+        futures = {executor.submit(check_headers, url, header_results, info_headers, args.headers, stats, args.timeout, args.user_agent): url for url in expanded_hosts}
 
         completed = 0
         for future in as_completed(futures):
@@ -337,12 +470,18 @@ def main():
         else:
             results.append("All hosts had this security header.")
 
-    # Apply the same sorting logic to server headers
-    for server_value, urls in server_headers.items():
-        server_headers[server_value] = sort_urls(urls)
-        results.append(f"\nServer Header: {server_value}\n{'-'*30}")
-        for url, _ in urls:
-            results.append(url)
+    # Add information disclosure headers section
+    if info_headers:
+        results.append(f"\n\nINFORMATION DISCLOSURE HEADERS DETECTED:\n{'='*60}")
+        for category, headers_dict in sorted(info_headers.items()):
+            results.append(f"\n[{category}]")
+            results.append('-' * (len(category) + 2))
+            for header_name, entries in sorted(headers_dict.items()):
+                results.append(f"\n{header_name}:")
+                for url, ip, value in entries:
+                    # Truncate very long values
+                    display_value = value if len(value) <= 100 else value[:97] + '...'
+                    results.append(f"  {url} [{ip}] - {display_value}")
     
     # Add summary statistics
     summary_stats = generate_summary_stats(stats, header_results, total_checks)
