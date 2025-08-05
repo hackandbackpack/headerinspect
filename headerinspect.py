@@ -501,7 +501,7 @@ def main():
                 for value, urls in sorted(value_to_urls.items()):
                     results.append(f"\n{header_name}: {value}")
                     for url in sorted(urls):
-                        results.append(f"  {url}")
+                        results.append(url)
     
     # Add summary statistics
     summary_stats = generate_summary_stats(stats, header_results, total_checks)
