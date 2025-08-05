@@ -488,11 +488,20 @@ def main():
             results.append(f"\n[{category}]")
             results.append('-' * (len(category) + 2))
             for header_name, entries in sorted(headers_dict.items()):
-                results.append(f"\n{header_name}:")
+                # Group URLs by their header values
+                value_to_urls = {}
                 for url, ip, value in entries:
                     # Truncate very long values
                     display_value = value if len(value) <= 100 else value[:97] + '...'
-                    results.append(f"  {url} [{ip}] - {display_value}")
+                    if display_value not in value_to_urls:
+                        value_to_urls[display_value] = []
+                    value_to_urls[display_value].append(url)
+                
+                # Output grouped results
+                for value, urls in sorted(value_to_urls.items()):
+                    results.append(f"\n{header_name}: {value}")
+                    for url in sorted(urls):
+                        results.append(f"  {url}")
     
     # Add summary statistics
     summary_stats = generate_summary_stats(stats, header_results, total_checks)
