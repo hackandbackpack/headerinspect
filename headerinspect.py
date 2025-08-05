@@ -20,7 +20,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Default security headers
 DEFAULT_SECURITY_HEADERS = [
     'Content-Security-Policy',
-    'X-Frame-Options',
     'Strict-Transport-Security'
 ]
 
